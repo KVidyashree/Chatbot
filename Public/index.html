@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>PwC Style Excel Chatbot</title>
+
+<style>
+    body {
+        background: #f5f2f0; /* PwC light beige */
+        font-family: "Segoe UI", Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        padding: 40px;
+        margin: 0;
+    }
+
+    /* Chatbox Container */
+    .chatbox {
+        width: 520px;
+        background: #ffffff;
+        border-radius: 18px;
+        box-shadow: 0 6px 30px rgba(0,0,0,0.15);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border-top: 5px solid #d04a02; /* PwC orange */
+    }
+
+    /* Header */
+    .header {
+        background: linear-gradient(90deg, #d04a02, #b33300);
+        color: white;
+        padding: 18px;
+        font-size: 20px;
+        font-weight: bold;
+        text-align: center;
+        letter-spacing: 1px;
+    }
+
+    /* Messages Area */
+    .messages {
+        height: 470px;
+        padding: 16px;
+        overflow-y: auto;
+        background: #faf7f5;
+    }
+
+    /* Message Bubble */
+    .msg {
+        padding: 14px 18px;
+        margin: 10px 0;
+        border-radius: 14px;
+        max-width: 85%;
+        white-space: pre-line;
+        font-size: 15px;
+        line-height: 1.45;
+        animation: fadeIn 0.25s ease-in-out;
+    }
+
+    /* User Message */
+    .user {
+        background: #ffe8d9;
+        border: 1px solid #f2c9b8;
+        align-self: flex-end;
+        margin-left: auto;
+    }
+
+    /* Bot Message */
+    .bot {
+        background: #f2f2f2;
+        border: 1px solid #dcdcdc;
+        align-self: flex-start;
+        margin-right: auto;
+    }
+
+    /* Typing Animation Container */
+    .typing-dots {
+        display: flex;
+        gap: 4px;
+        padding: 10px;
+    }
+
+    .dot {
+        width: 8px;
+        height: 8px;
+        background: #999;
+        border-radius: 50%;
+        animation: blink 1.4s infinite both;
+    }
+
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes blink {
+        0%   { opacity: 0.2; transform: translateY(0); }
+        20%  { opacity: 1; transform: translateY(-3px); }
+        100% { opacity: 0.2; transform: translateY(0); }
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(5px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Footer Input Area */
+    .footer {
+        display: flex;
+        padding: 12px;
+        border-top: 1px solid #ddd;
+        background: #f1efed;
+    }
+
+    input {
+        flex: 1;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid #bbb;
+        font-size: 16px;
+        outline: none;
+    }
+
+    button {
+        padding: 12px 18px;
+        margin-left: 10px;
+        background: #d04a02;
+        color: white;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 15px;
+        font-weight: bold;
+    }
+
+    button:hover {
+        background: #b33f00;
+    }
+
+    a {
+        color: #c63d00;
+        font-weight: bold;
+    }
+
+</style>
+</head>
+
+<body>
+
+<div class="chatbox">
+    <div class="header">PwC Excel Knowledge Chatbot</div>
+
+    <div class="messages" id="messages">
+        <div class="msg bot">Hello! 👋  
+I'm your PwC-style intelligent assistant.  
+Ask me anything — I'll search your Excel, fetch web data, and give the best answer.</div>
+    </div>
+
+    <div class="footer">
+        <input id="q" placeholder="Ask a question..." onkeydown="handleEnter(event)" />
+        <button onclick="send()">Send</button>
+    </div>
+</div>
+
+<script>
+/* Add a message bubble */
+function addMessage(text, who) {
+    const msgBox = document.getElementById("messages");
+    const div = document.createElement("div");
+    div.className = "msg " + who;
+    div.innerHTML = text.replace(/\n/g, "<br>");
+    msgBox.appendChild(div);
+    msgBox.scrollTop = msgBox.scrollHeight;
+}
+
+/* Typing animation (3 dots) */
+function addTyping() {
+    const msgBox = document.getElementById("messages");
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    div.id = "typingIndicator";
+
+    div.innerHTML = `
+        <div class="typing-dots">
+            <div class="dot"></div>
+            <div class="dot"></div>
+            <div class="dot"></div>
+        </div>
+    `;
+
+    msgBox.appendChild(div);
+    msgBox.scrollTop = msgBox.scrollHeight;
+}
+
+/* Remove typing animation */
+function removeTyping() {
+    const el = document.getElementById("typingIndicator");
+    if (el) el.remove();
+}
+
+/* Handle ENTER key */
+function handleEnter(event) {
+    if (event.key === "Enter") {
+        send();
+    }
+}
+
+/* Send message to backend */
+async function send() {
+    const input = document.getElementById("q");
+    const text = input.value.trim();
+    if (!text) return;
+
+    addMessage(text, "user");
+    input.value = "";
+
+    addTyping();
+
+    try {
+        const response = await fetch("http://localhost:9000/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: text })
+        });
+
+        const data = await response.json();
+        removeTyping();
+
+        let finalText = data.answer || "No answer received.";
+
+        if (data.source) {
+            finalText += `\n\nSource: <a href="${data.source}" target="_blank">${data.source}</a>`;
+        }
+
+        addMessage(finalText, "bot");
+
+    } catch (err) {
+        removeTyping();
+        addMessage("⚠️ Error reaching server: " + err, "bot");
+    }
+}
+</script>
+
+</body>
+</html>
