@@ -1,29 +1,28 @@
 /**
- * FINAL server.js — Excel + Web Scraper + General AI Chatbot
- * ----------------------------------------------------------
- * ✔ Excel lookup
- * ✔ TF-IDF + Jaccard + Column boost
- * ✔ Web scraping using Browserless API (Render compatible)
- * ✔ General search mode for "Modi", "Elon Musk", etc.
- * ✔ Small talk
+ * FINAL server.js — Browserless Scraping + Hybrid Local AI (Render Compatible)
+ * -------------------------------------------------------------------------
+ * ✔ Multi-sheet Excel reader
+ * ✔ TF-IDF + Jaccard + Column Boost hybrid matching
  * ✔ Local summarizer
- * ✔ Serves frontend from /public
+ * ✔ Browserless.io scraping (NO Puppeteer needed)
+ * ✔ General search (DuckDuckGo → Browserless)
+ * ✔ Excel-link scraping
+ * ✔ Works on Render free tier
  */
 
-require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
-const axios = require("axios");
 const XLSX = require("xlsx");
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 /* -------------------------------------------------------
-   Serve UI from /public
+   Serve frontend
 ------------------------------------------------------- */
 const PUBLIC_DIR = path.join(__dirname, "public");
 if (fs.existsSync(PUBLIC_DIR)) {
@@ -34,7 +33,7 @@ if (fs.existsSync(PUBLIC_DIR)) {
    Excel File
 ------------------------------------------------------- */
 const EXCEL_PATH = path.join(__dirname, "california_pipeline_multi_hazard_sources.xlsx");
-console.log("📄 Excel Path:", EXCEL_PATH);
+console.log("📄 Using Excel:", EXCEL_PATH);
 
 let excelData = [];
 
@@ -46,39 +45,42 @@ try {
             rows.forEach(r => (r._sheet = sheet));
             excelData.push(...rows);
         });
-        console.log(`✅ Loaded Excel: ${excelData.length} rows`);
-    } else {
-        console.log("⚠️ Excel NOT found. Only general web search will work.");
+        console.log("✅ Excel Loaded:", excelData.length, "rows");
     }
 } catch (e) {
-    console.log("❌ Excel load error:", e);
+    console.error("❌ Excel load error", e.message);
 }
 
 /* -------------------------------------------------------
-   Text Utilities
+   Text utilities
 ------------------------------------------------------- */
-const normalize = s => String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-const tokenize = s => normalize(s).split(" ").filter(Boolean);
+function normalizeText(s = "") {
+    return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+function tokenize(s = "") {
+    return normalizeText(s).split(" ").filter(Boolean);
+}
 
 /* -------------------------------------------------------
-   Cosine Similarity
+   Cosine similarity
 ------------------------------------------------------- */
-function cosine(a, b) {
-    const all = Array.from(new Set([...a, ...b]));
-    const av = all.map(t => a.filter(x => x === t).length);
-    const bv = all.map(t => b.filter(x => x === t).length);
+function cosineSimilarity(a, b) {
+    const all = [...new Set([...a, ...b])];
     let dot = 0;
 
-    for (let i = 0; i < av.length; i++) dot += av[i] * bv[i];
+    const aVec = all.map(t => a.filter(x => x === t).length);
+    const bVec = all.map(t => b.filter(x => x === t).length);
 
-    const magA = Math.sqrt(av.reduce((s, v) => s + v * v, 0));
-    const magB = Math.sqrt(bv.reduce((s, v) => s + v * v, 0));
+    for (let i = 0; i < aVec.length; i++) dot += aVec[i] * bVec[i];
+
+    const magA = Math.sqrt(aVec.reduce((s, v) => s + v * v, 0));
+    const magB = Math.sqrt(bVec.reduce((s, v) => s + v * v, 0));
 
     return magA && magB ? dot / (magA * magB) : 0;
 }
 
 /* -------------------------------------------------------
-   Build TF-IDF Index
+   TF-IDF Index
 ------------------------------------------------------- */
 let docs = [];
 let idf = {};
@@ -90,12 +92,12 @@ function buildIndex() {
     vocab = new Set();
 
     excelData.forEach((row, i) => {
-        const parts = [
-            row["Dataset / Reference Name"],
-            row["Topic"],
+        const text = (
+            row["Dataset / Reference Name"] + " " +
+            row["Topic"] + " " +
             row["Description"]
-        ].filter(Boolean);
-        const text = parts.join(" ") || Object.values(row).join(" ");
+        ) || Object.values(row).join(" ");
+
         const tokens = tokenize(text);
 
         const tf = {};
@@ -104,40 +106,60 @@ function buildIndex() {
             vocab.add(t);
         });
 
-        docs.push({ tokens, tf, rowIndex: i });
+        docs.push({ text, tokens, tf, tfidf: {}, rowIndex: i });
     });
 
-    const N = docs.length || 1;
+    const N = docs.length;
 
     vocab.forEach(t => {
-        const df = docs.filter(d => d.tf[t]).length;
+        let df = docs.filter(d => d.tf[t]).length;
         idf[t] = Math.log((N + 1) / (df + 1)) + 1;
     });
 
     docs.forEach(d => {
-        const tfidf = {};
+        let tfidf = {};
         let norm = 0;
+
         for (const t in d.tf) {
             tfidf[t] = d.tf[t] * idf[t];
             norm += tfidf[t] * tfidf[t];
         }
+
         norm = Math.sqrt(norm) || 1;
+
         for (const t in tfidf) tfidf[t] /= norm;
+
         d.tfidf = tfidf;
     });
 
-    console.log("🔎 TF-IDF Index Built | Vocab:", vocab.size);
+    console.log("🔎 Built TF-IDF index. Docs:", docs.length);
 }
-
 buildIndex();
 
 /* -------------------------------------------------------
-   Ranking Function
+   Hybrid Ranking
 ------------------------------------------------------- */
-function hybridRank(question) {
-    const qTokens = tokenize(question);
-    const qSet = new Set(qTokens);
+function jaccardScore(qSet, docTokens) {
+    const dSet = new Set(docTokens);
+    const inter = [...qSet].filter(t => dSet.has(t)).length;
+    const uni = new Set([...qSet, ...dSet]).size;
+    return inter / (uni || 1);
+}
 
+function computeColumnBoost(qTokens, row) {
+    let boost = 0;
+    ["Dataset / Reference Name", "Topic"].forEach(col => {
+        if (row[col]) {
+            const t = tokenize(row[col]);
+            qTokens.forEach(q => {
+                if (t.includes(q)) boost += 0.15;
+            });
+        }
+    });
+    return Math.min(boost, 0.5);
+}
+
+function cosineAgainstDocs(qTokens) {
     const qtf = {};
     qTokens.forEach(t => qtf[t] = (qtf[t] || 0) + 1);
 
@@ -148,199 +170,205 @@ function hybridRank(question) {
         qmap[t] = qtf[t] * (idf[t] || 0);
         norm += qmap[t] * qmap[t];
     }
+
     norm = Math.sqrt(norm) || 1;
     for (const t in qmap) qmap[t] /= norm;
 
-    const results = docs.map((d, idx) => {
+    return docs.map(d => {
         let dot = 0;
         for (const t in qmap) if (d.tfidf[t]) dot += qmap[t] * d.tfidf[t];
 
-        const jac = jaccard(qSet, d.tokens);
-        const cb = columnBoost(qTokens, excelData[idx]);
-
-        const score = 0.55 * dot + 0.25 * jac + 0.20 * cb;
-        return { score, cosine: dot, jaccard: jac, columnBoost: cb, row: excelData[idx] };
+        return { rowIndex: d.rowIndex, cosine: dot };
     });
-
-    results.sort((a, b) => b.score - a.score);
-    const max = results[0]?.score || 1;
-    results.forEach(r => r.confidence = r.score / max);
-
-    return results;
 }
 
-function jaccard(a, tokens) {
-    const b = new Set(tokens);
-    const inter = [...a].filter(x => b.has(x)).length;
-    const union = new Set([...a, ...b]).size || 1;
-    return inter / union;
-}
+function hybridRank(question) {
+    const qTokens = tokenize(question);
+    const qSet = new Set(qTokens);
 
-function columnBoost(qt, row) {
-    let b = 0;
-    ["Dataset / Reference Name", "Topic"].forEach(key => {
-        if (row[key]) tokenize(row[key]).forEach(t => {
-            if (qt.includes(t)) b += 0.15;
-        });
+    const base = cosineAgainstDocs(qTokens);
+
+    const ranked = base.map(entry => {
+        const row = excelData[entry.rowIndex];
+        const doc = docs[entry.rowIndex];
+
+        const js = jaccardScore(qSet, doc.tokens);
+        const cb = computeColumnBoost(qTokens, row);
+
+        const score = 0.55 * entry.cosine + 0.25 * js + 0.2 * cb;
+
+        return {
+            row,
+            rowIndex: entry.rowIndex,
+            score,
+            confidence: 0,
+            cosine: entry.cosine,
+            jaccard: js,
+            columnBoost: cb
+        };
     });
-    return Math.min(b, 0.5);
+
+    ranked.sort((a, b) => b.score - a.score);
+    const max = ranked[0].score || 1;
+
+    ranked.forEach(r => r.confidence = r.score / max);
+
+    return ranked;
 }
 
 /* -------------------------------------------------------
-   Browserless Web Scraping (Render compatible)
+   Browserless Scraper (NO Puppeteer)
 ------------------------------------------------------- */
-async function scrapeBrowserless(url) {
+async function scrapeWithBrowserless(url) {
     try {
-        const BL_KEY = process.env.BROWSERLESS_KEY;
-        if (!BL_KEY) return null;
+        const key = process.env.BROWSERLESS_API_KEY;
+        if (!key) {
+            console.log("⚠️ No Browserless API key found");
+            return null;
+        }
 
-        const response = await axios.post(
-            `https://chrome.browserless.io/content?token=${BL_KEY}`,
+        const resp = await axios.post(
+            `https://chrome.browserless.io/content?token=${key}`,
             { url },
-            { timeout: 20000 }
+            { timeout: 30000 }
         );
 
-        return response.data ? String(response.data) : null;
-    } catch (e) {
-        console.log("❌ Browserless scrape error:", e.message);
+        return resp.data || null;
+    } catch (err) {
+        console.error("❌ Browserless error:", err.message);
         return null;
     }
 }
 
 /* -------------------------------------------------------
-   General Web Search Mode (Bing Search Page)
+   General Search (DuckDuckGo → Browserless)
 ------------------------------------------------------- */
-async function generalWebSearch(question) {
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(question)}`;
-    return { url, text: await scrapeBrowserless(url) };
+async function generalAnswer(question) {
+    const q = encodeURIComponent(question);
+    const url = `https://duckduckgo.com/?q=${q}`;
+
+    const text = await scrapeWithBrowserless(url);
+
+    if (!text) return null;
+
+    const sentences = text.split(/\n+/).filter(s => s.trim().length > 30);
+
+    return sentences.slice(0, 5).join("\n\n");
 }
 
 /* -------------------------------------------------------
    Summarizer
 ------------------------------------------------------- */
-function summarize(text, question) {
+function extractTopSentences(text, question) {
+    if (!text) return null;
+
     const sentences = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    if (!sentences.length) return null;
+
     const qTokens = tokenize(question);
 
-    const scored = sentences.map(s => {
+    const ranked = sentences.map(s => {
         const t = tokenize(s);
-        const score =
-            0.5 * cosine(qTokens, t) +
-            0.3 * jaccard(new Set(qTokens), t) +
+        const sim =
+            0.5 * cosineSimilarity(qTokens, t) +
+            0.3 * jaccardScore(new Set(qTokens), t) +
             0.2 * (t.filter(x => qTokens.includes(x)).length / (qTokens.length || 1));
-        return { s, score };
+
+        return { s, score: sim };
     });
 
-    scored.sort((a, b) => b.score - a.score);
+    ranked.sort((a, b) => b.score - a.score);
 
-    return scored.slice(0, 5).map(x => x.s).join("\n\n");
+    return ranked.slice(0, 5).map(x => x.s).join("\n\n");
 }
 
 /* -------------------------------------------------------
-   Small Talk
+   Small talk
 ------------------------------------------------------- */
 const smallTalk = {
     "hi": "Hi! 👋 How can I help today?",
-    "hello": "Hello! 😊 How may I assist?",
-    "how are you": "I'm great — ready to help!",
-    "good morning": "Good morning ☀️",
-    "good evening": "Good evening 🌙",
-    "thanks": "You're welcome! 🙌"
+    "hello": "Hello! 😊 Ask me anything.",
+    "how are you": "I'm doing great — ready to assist!"
 };
 
 /* -------------------------------------------------------
-   Root & Health
+   Root Endpoint
 ------------------------------------------------------- */
 app.get("/", (req, res) => {
-    const file = path.join(PUBLIC_DIR, "index.html");
-    if (fs.existsSync(file)) return res.sendFile(file);
-    res.send("Backend running. POST /ask");
+    const indexPath = path.join(PUBLIC_DIR, "index.html");
+    if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
+    res.send("Backend running — POST /ask");
 });
 
-app.get("/healthz", (req, res) => res.send("ok"));
-
 /* -------------------------------------------------------
-   MAIN CHATBOT ENDPOINT
+   Chat Endpoint
 ------------------------------------------------------- */
 app.post("/ask", async (req, res) => {
     const question = req.body.question?.trim();
+
     if (!question) return res.json({ answer: "Please enter a question." });
 
-    // 1. Small Talk
-    const lower = question.toLowerCase();
-    for (const k in smallTalk) {
-        if (lower.includes(k)) return res.json({ answer: smallTalk[k] });
+    // small talk
+    if (smallTalk[question.toLowerCase()]) {
+        return res.json({ answer: smallTalk[question.toLowerCase()] });
     }
 
-    // 2. Excel not loaded?
+    // GENERAL QUESTION → Browserless → DuckDuckGo
     if (!excelData.length) {
-        console.log("⚠ Excel empty → switching to Web Search");
-        const search = await generalWebSearch(question);
-        const summary = search.text ? summarize(search.text, question) : null;
-        return res.json({
-            answer: summary || "I could not extract meaningful information.",
-            matchMethod: "web-search",
-            source: search.url
-        });
+        const general = await generalAnswer(question);
+        if (general) return res.json({ answer: general, matchMethod: "general-search" });
+
+        return res.json({ answer: "I could not fetch information online." });
     }
 
-    // 3. Excel Matching
+    // Otherwise → Excel Hybrid
     const ranked = hybridRank(question);
     const best = ranked[0];
-    const conf = best.confidence;
 
-    // 4. If confidence too low → general web search
-    if (conf < 0.15) {
-        console.log("🌐 Low confidence → Web Search Mode");
-        const search = await generalWebSearch(question);
-        const summary = search.text ? summarize(search.text, question) : null;
-
-        return res.json({
-            answer: summary || "I could not extract useful information.",
-            matchMethod: "web-search",
-            confidence: conf,
-            source: search.url
-        });
-    }
-
-    // 5. Excel link scraping mode
     const row = best.row;
+    const sheet = row._sheet;
+    const confidence = Number(best.confidence.toFixed(3));
+
     const link =
         row.Link ||
         row["Primary URL"] ||
         row["Download / Service URL"] ||
-        row.URL;
+        row.URL ||
+        null;
 
+    // If no link → return Excel row details
     if (!link) {
-        return res.json({
-            answer: JSON.stringify(row, null, 2),
-            matchMethod: "excel-fallback",
-            confidence: conf
-        });
+        let txt = `Best match from sheet: ${sheet}\nConfidence: ${confidence}\n\n`;
+        for (const k in row) if (k !== "_sheet") txt += `${k}: ${row[k]}\n`;
+
+        return res.json({ answer: txt.trim(), matchMethod: "excel-fallback" });
     }
 
-    const scraped = await scrapeBrowserless(link);
-    if (!scraped) {
-        return res.json({
-            answer: JSON.stringify(row, null, 2),
-            matchMethod: "blocked",
-            confidence: conf,
-            source: link
-        });
+    // Try Browserless for scraping
+    const text = await scrapeWithBrowserless(link);
+
+    if (!text || text.length < 100) {
+        let txt = `Sheet: ${sheet}\nConfidence: ${confidence}\n(Webpage unavailable)\n\n`;
+        for (const k in row) if (k !== "_sheet") txt += `${k}: ${row[k]}\n`;
+
+        return res.json({ answer: txt.trim(), matchMethod: "excel-fallback" });
     }
 
-    const summary = summarize(scraped, question);
+    const summary = extractTopSentences(text, question);
+
     return res.json({
-        answer: summary || JSON.stringify(row, null, 2),
-        matchMethod: "hybrid+scrape",
-        confidence: conf,
-        source: link
+        answer: summary || text.slice(0, 500),
+        sheet,
+        confidence,
+        source: link,
+        matchMethod: "hybrid+browserless"
     });
 });
 
 /* -------------------------------------------------------
    Start Server
 ------------------------------------------------------- */
-app.listen(process.env.PORT || 9000, () =>
-    console.log("🚀 Server running on PORT", process.env.PORT || 9000)
-);
+const PORT = process.env.PORT || 9000;
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});
